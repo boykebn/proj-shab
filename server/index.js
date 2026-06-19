@@ -1,17 +1,53 @@
 import express from "express";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeDb, normalizePatient } from "./db/normalize.js";
+import { createJsonStore } from "./db/json-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(rootDir, "data");
 const dataPath = process.env.DATA_PATH ? path.resolve(process.env.DATA_PATH) : path.join(dataDir, "db.json");
 const distDir = path.join(rootDir, "dist");
+const store = createJsonStore(dataPath);
 const app = express();
 const port = process.env.PORT || 4000;
+const allowedOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (!origin || !allowedOrigins.length) {
+    if (!origin) {
+      res.header("Access-Control-Allow-Origin", "*");
+    }
+  } else if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Vary", "Origin");
+  }
+
+  res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
+  next();
+});
 
 app.use(express.json());
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "pmb-shabrina-api",
+    time: new Date().toISOString()
+  });
+});
 
 function getTodayKey() {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -22,38 +58,6 @@ function getTodayKey() {
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
-}
-
-async function readDb() {
-  const raw = await readFile(dataPath, "utf8");
-  const db = JSON.parse(raw);
-  return normalizeDb(db);
-}
-
-async function writeDb(db) {
-  await mkdir(path.dirname(dataPath), { recursive: true });
-  await writeFile(dataPath, JSON.stringify(db, null, 2));
-}
-
-function normalizeDb(db) {
-  return {
-    patients: Array.isArray(db.patients) ? db.patients : [],
-    settings: {
-      clinicName: "PMB Shabrina Nur Islami",
-      ownerName: "Shabrina Nur Islami, S.Tr.Keb.,Bdn.,CPHCT",
-      phone: "0812 3456 7890",
-      email: "shabrina.pmb@gmail.com",
-      address: "Jl. Kesehatan No. 12, Jakarta Timur",
-      reminders: [],
-      ...(db.settings || {})
-    },
-    reminders: {
-      sentToday: 0,
-      successRate: 0,
-      logs: [],
-      ...(db.reminders || {})
-    }
-  };
 }
 
 function daysBetween(from, to) {
@@ -212,7 +216,7 @@ function validatePatient(input) {
 
 app.get("/api/bootstrap", async (req, res, next) => {
   try {
-    res.json(bootstrap(await readDb()));
+    res.json(bootstrap(await store.readDb()));
   } catch (error) {
     next(error);
   }
@@ -220,7 +224,7 @@ app.get("/api/bootstrap", async (req, res, next) => {
 
 app.get("/api/reports", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : undefined;
     const to = typeof req.query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : undefined;
     res.json(getReports(db.patients, { from, to }));
@@ -234,19 +238,21 @@ app.post("/api/patients", async (req, res, next) => {
     const error = validatePatient(req.body);
     if (error) return res.status(400).json({ error });
 
-    const db = await readDb();
-    const patient = {
+    const patient = normalizePatient({
       id: `p-${Date.now()}`,
       name: req.body.name.trim(),
       phone: req.body.phone.trim(),
       kbType: req.body.kbType,
       status: req.body.status || "Kontrol Ulang",
+      serviceDate: req.body.serviceDate || getTodayKey(),
       nextControlDate: req.body.nextControlDate,
       time: req.body.time,
-      avatar: req.body.avatar || "hijab"
-    };
-    db.patients.push(patient);
-    await writeDb(db);
+      avatar: req.body.avatar || "hijab",
+      spouseName: req.body.spouseName || "",
+      address: req.body.address || "",
+      methodNote: req.body.methodNote || ""
+    });
+    await store.createPatient(patient);
     res.status(201).json(decoratePatient(patient));
   } catch (error) {
     next(error);
@@ -255,13 +261,12 @@ app.post("/api/patients", async (req, res, next) => {
 
 app.patch("/api/patients/:id", async (req, res, next) => {
   try {
-    const db = await readDb();
-    const index = db.patients.findIndex((patient) => patient.id === req.params.id);
-    if (index === -1) return res.status(404).json({ error: "Akseptor tidak ditemukan" });
-
-    db.patients[index] = { ...db.patients[index], ...req.body };
-    await writeDb(db);
-    res.json(decoratePatient(db.patients[index]));
+    const nextPatient = await store.updatePatient(req.params.id, (current) => normalizePatient({
+      ...current,
+      ...req.body
+    }));
+    if (!nextPatient) return res.status(404).json({ error: "Akseptor tidak ditemukan" });
+    res.json(decoratePatient(nextPatient));
   } catch (error) {
     next(error);
   }
@@ -269,9 +274,7 @@ app.patch("/api/patients/:id", async (req, res, next) => {
 
 app.delete("/api/patients/:id", async (req, res, next) => {
   try {
-    const db = await readDb();
-    db.patients = db.patients.filter((patient) => patient.id !== req.params.id);
-    await writeDb(db);
+    await store.deletePatient(req.params.id);
     res.status(204).end();
   } catch (error) {
     next(error);
@@ -280,7 +283,7 @@ app.delete("/api/patients/:id", async (req, res, next) => {
 
 app.post("/api/reminders/send-today", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     const targets = req.body?.patientIds?.length ? db.patients.filter((patient) => req.body.patientIds.includes(patient.id)) : db.patients.filter((patient) => decoratePatient(patient).daysUntil <= 7);
     const sentCount = Math.max(1, targets.length);
     db.reminders.sentToday += sentCount;
@@ -295,7 +298,7 @@ app.post("/api/reminders/send-today", async (req, res, next) => {
       status: "Terkirim"
     })));
     db.reminders.logs = db.reminders.logs.slice(0, 100);
-    await writeDb(db);
+    await store.writeDb(db);
     res.json(db.reminders);
   } catch (error) {
     next(error);
@@ -304,7 +307,7 @@ app.post("/api/reminders/send-today", async (req, res, next) => {
 
 app.get("/api/reports/patients.csv", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : undefined;
     const to = typeof req.query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : undefined;
     const filteredPatients = from && to
@@ -327,13 +330,13 @@ app.get("/api/reports/patients.csv", async (req, res, next) => {
 
 app.patch("/api/settings/reminders/:id", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     const reminder = db.settings.reminders.find((item) => item.id === req.params.id);
     if (!reminder) return res.status(404).json({ error: "Pengingat tidak ditemukan" });
 
     if (typeof req.body.enabled === "boolean") reminder.enabled = req.body.enabled;
     if (req.body.time) reminder.time = req.body.time;
-    await writeDb(db);
+    await store.writeDb(db);
     res.json(reminder);
   } catch (error) {
     next(error);
@@ -342,12 +345,12 @@ app.patch("/api/settings/reminders/:id", async (req, res, next) => {
 
 app.patch("/api/settings/profile", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     const allowed = ["clinicName", "ownerName", "phone", "email", "address"];
     for (const key of allowed) {
       if (typeof req.body[key] === "string") db.settings[key] = req.body[key].trim();
     }
-    await writeDb(db);
+    await store.writeDb(db);
     res.json(db.settings);
   } catch (error) {
     next(error);
@@ -356,7 +359,7 @@ app.patch("/api/settings/profile", async (req, res, next) => {
 
 app.get("/api/export", async (req, res, next) => {
   try {
-    const db = await readDb();
+    const db = await store.readDb();
     res.setHeader("Content-Disposition", "attachment; filename=pmb-shabrina-backup.json");
     res.json(db);
   } catch (error) {
@@ -367,8 +370,8 @@ app.get("/api/export", async (req, res, next) => {
 app.post("/api/import", async (req, res, next) => {
   try {
     const incoming = normalizeDb(req.body);
-    await writeDb(incoming);
-    res.json(bootstrap(await readDb()));
+    await store.replaceDb(incoming);
+    res.json(bootstrap(await store.readDb()));
   } catch (error) {
     next(error);
   }

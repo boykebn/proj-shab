@@ -14,6 +14,8 @@ import {
 } from "recharts";
 import "./styles.css";
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+
 const navItems = [
   ["home", "Beranda", "home"],
   ["akseptor", "Akseptor", "users"],
@@ -65,7 +67,7 @@ function Icon({ name, small = false }) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options
   });
@@ -75,6 +77,10 @@ async function api(path, options = {}) {
   }
   if (response.status === 204) return null;
   return response.json();
+}
+
+function apiUrl(path) {
+  return `${API_BASE_URL}${path}`;
 }
 
 function App() {
@@ -235,7 +241,7 @@ function App() {
 
   function downloadReportCsv(range = reportRange) {
     const query = new URLSearchParams(range).toString();
-    window.open(`/api/reports/patients.csv?${query}`, "_blank");
+    window.open(apiUrl(`/api/reports/patients.csv?${query}`), "_blank");
     setNotice({ title: "Laporan dibuat", body: `CSV laporan periode ${range.from} s.d. ${range.to} sedang dibuka/diunduh dari backend.` });
   }
 
@@ -272,7 +278,7 @@ function App() {
   }
 
   function downloadBackup() {
-    window.open("/api/export", "_blank");
+    window.open(apiUrl("/api/export"), "_blank");
     setNotice({ title: "Backup dibuat", body: "File backup JSON dibuka/diunduh dari data dummy backend." });
   }
 
