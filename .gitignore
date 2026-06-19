@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.vite/
+
+*.log
+
+report-*.png
+screencapture-*.png
+codex-clipboard-*.png
+
+.DS_Store
+Thumbs.db
