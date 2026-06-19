@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
-const dataPath = path.join(rootDir, "data", "db.json");
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(rootDir, "data");
+const dataPath = process.env.DATA_PATH ? path.resolve(process.env.DATA_PATH) : path.join(dataDir, "db.json");
 const distDir = path.join(rootDir, "dist");
 const app = express();
 const port = process.env.PORT || 4000;
